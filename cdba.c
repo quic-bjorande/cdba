@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <alloca.h>
 #include <err.h>
@@ -24,6 +25,8 @@
 #include "circ_buf.h"
 #include "list.h"
 
+#define TX_DATA_CHUNK_SIZE 2048
+
 static bool quit;
 static bool fastboot_repeat;
 static bool fastboot_done;
@@ -32,6 +35,16 @@ static bool fastboot_continue;
 static int status_fd = -1;
 
 static const char *fastboot_file;
+
+struct tx_item {
+	struct list_head node;
+
+	uint8_t type;
+	uint16_t len;
+	uint8_t payload[];
+};
+
+static struct list_head tx_queue = LIST_INIT(tx_queue);
 
 static struct termios *tty_unbuffer(void)
 {
@@ -128,40 +141,54 @@ static int fork_ssh(const char *host, const char *cmd, int *pipes)
 	return 0;
 }
 
-#define cdba_send(fd, type) cdba_send_buf(fd, type, 0, NULL)
-static int cdba_send_buf(int fd, int type, size_t len, const void *buf)
+static ssize_t cdba_tx_one(int fd, struct tx_item *item)
 {
-	int ret;
+	struct iovec iov[2];
+	struct msg msg;
 
-	struct msg msg = {
-		.type = type,
-		.len = len
-	};
+	msg.type = item->type;
+	msg.len = item->len;
 
-	ret = write(fd, &msg, sizeof(msg));
-	if (ret < 0)
-		return ret;
+	iov[0].iov_base = &msg;
+	iov[0].iov_len = sizeof(msg);
 
-	if (len)
-		ret = write(fd, buf, len);
+	iov[1].iov_base = item->payload;
+	iov[1].iov_len = item->len;
 
-	return ret < 0 ? ret : 0;
+	return writev(fd, iov, item->len ? 2 : 1);
 }
 
-static int cdba_send_key(int fd, int key, uint8_t state)
+static void cdba_queue_data(int type, size_t len, const void *buf)
+{
+	struct tx_item *item;
+
+	item = calloc(1, sizeof(*item) + len);
+	item->type = type;
+	item->len = len;
+	memcpy(item->payload, buf, len);
+
+	list_append(&tx_queue, &item->node);
+}
+
+static void cdba_queue(int type)
+{
+	cdba_queue_data(type, 0, NULL);
+}
+
+static void cdba_send_key(int fd, int key, uint8_t state)
 {
 	struct key_press press = {
 		.key = key,
 		.state = state,
 	};
 
-	return cdba_send_buf(fd, MSG_KEY_PRESS, sizeof(press), &press);
+	cdba_queue_data(MSG_KEY_PRESS, sizeof(press), &press);
 }
 
-static int cdba_toggle_key(int fd, int key, bool key_state[DEVICE_KEY_COUNT])
+static void cdba_toggle_key(int fd, int key, bool key_state[DEVICE_KEY_COUNT])
 {
 	key_state[key] = !key_state[key];
-	return cdba_send_key(fd, key, key_state[key]);
+	cdba_send_key(fd, key, key_state[key]);
 }
 
 static int tty_callback(int *ssh_fds)
@@ -186,25 +213,25 @@ static int tty_callback(int *ssh_fds)
 				quit = true;
 				break;
 			case 'P':
-				cdba_send(ssh_fds[0], MSG_POWER_ON);
+				cdba_queue(MSG_POWER_ON);
 				break;
 			case 'p':
-				cdba_send(ssh_fds[0], MSG_POWER_OFF);
+				cdba_queue(MSG_POWER_OFF);
 				break;
 			case 's':
-				cdba_send(ssh_fds[0], MSG_STATUS_UPDATE);
+				cdba_queue(MSG_STATUS_UPDATE);
 				break;
 			case 'V':
-				cdba_send(ssh_fds[0], MSG_VBUS_ON);
+				cdba_queue(MSG_VBUS_ON);
 				break;
 			case 'v':
-				cdba_send(ssh_fds[0], MSG_VBUS_OFF);
+				cdba_queue(MSG_VBUS_OFF);
 				break;
 			case 'a':
-				cdba_send_buf(ssh_fds[0], MSG_CONSOLE, 1, &ctrl_a);
+				cdba_queue_data(MSG_CONSOLE, 1, &ctrl_a);
 				break;
 			case 'B':
-				cdba_send(ssh_fds[0], MSG_SEND_BREAK);
+				cdba_queue(MSG_SEND_BREAK);
 				break;
 			case 'o':
 				cdba_send_key(ssh_fds[0], DEVICE_KEY_POWER, KEY_PRESS_PULSE);
@@ -222,194 +249,80 @@ static int tty_callback(int *ssh_fds)
 
 			special = false;
 		} else {
-			cdba_send_buf(ssh_fds[0], MSG_CONSOLE, 1, buf + k);
+			cdba_queue_data(MSG_CONSOLE, 1, buf + k);
 		}
 	}
 
 	return 0;
 }
 
-struct work {
-	void (*fn)(struct work *work, int ssh_stdin);
-
-	struct list_head node;
-};
-
-static struct list_head work_items = LIST_INIT(work_items);
-
-static void list_boards_fn(struct work *work, int ssh_stdin)
-{
-	int ret;
-
-	ret = cdba_send(ssh_stdin, MSG_LIST_DEVICES);
-	if (ret < 0)
-		err(1, "failed to send board list request");
-
-	free(work);
-}
-
+/**
+ * request_board_list() - Queue a request for a boards list
+ */
 static void request_board_list(void)
 {
-	struct work *work;
-
-	work = malloc(sizeof(*work));
-	work->fn = list_boards_fn;
-
-	list_append(&work_items, &work->node);
+	cdba_queue(MSG_LIST_DEVICES);
 }
 
-struct board_info_request {
-	struct work work;
-	const char *board;
-};
-
-static void board_info_fn(struct work *work, int ssh_stdin)
-{
-	struct board_info_request *board = container_of(work, struct board_info_request, work);
-	int ret;
-
-	ret = cdba_send_buf(ssh_stdin, MSG_BOARD_INFO,
-			    strlen(board->board) + 1,
-			    board->board);
-	if (ret < 0)
-		err(1, "failed to send board info request");
-
-	free(work);
-}
-
+/**
+ * request_board_info() - Queue a request for a specific "board"
+ * @board: identifier of the board
+ *
+ * Note that @board is assumed to be alive until the message has been queued,
+ * and will not be freed.
+ */
 static void request_board_info(const char *board)
 {
-	struct board_info_request *work;
-
-	work = malloc(sizeof(*work));
-	work->work.fn = board_info_fn;
-	work->board = board;
-
-	list_append(&work_items, &work->work.node);
+	cdba_queue_data(MSG_BOARD_INFO, strlen(board) + 1, board);
 }
 
-struct select_board {
-	struct work work;
-
-	const char *board;
-};
-
-static void select_board_fn(struct work *work, int ssh_stdin)
-{
-	struct select_board *board = container_of(work, struct select_board, work);
-	int ret;
-
-	ret = cdba_send_buf(ssh_stdin, MSG_SELECT_BOARD,
-			    strlen(board->board) + 1,
-			    board->board);
-	if (ret < 0)
-		err(1, "failed to send power on request");
-
-	free(work);
-}
-
+/**
+ * request_select_board() - Queue a request for a specific "board"
+ * @board: identifier of the board
+ *
+ * Note that @board is assumed to be alive until the message has been queued,
+ * and will not be freed.
+ */
 static void request_select_board(const char *board)
 {
-	struct select_board *work;
-
-	work = malloc(sizeof(*work));
-	work->work.fn = select_board_fn;
-	work->board = board;
-
-	list_append(&work_items, &work->work.node);
+	cdba_queue_data(MSG_SELECT_BOARD, strlen(board) + 1, board);
 }
 
-static void request_power_on_fn(struct work *work, int ssh_stdin)
-{
-	int ret;
-
-	ret = cdba_send(ssh_stdin, MSG_POWER_ON);
-	if (ret < 0)
-		err(1, "failed to send power on request");
-}
-
-static void request_power_off_fn(struct work *work, int ssh_stdin)
-{
-	int ret;
-
-	ret = cdba_send(ssh_stdin, MSG_POWER_OFF);
-	if (ret < 0)
-		err(1, "failed to send power off request");
-}
-
+/**
+ * request_power_on() - Queue a request to power on the selected board
+ */
 static void request_power_on(void)
 {
-	static struct work work = { request_power_on_fn };
-
-	list_append(&work_items, &work.node);
+	cdba_queue(MSG_POWER_ON);
 }
 
+/**
+ * request_power_off() - Queue a request to power off the selected board
+ */
 static void request_power_off(void)
 {
-	static struct work work = { request_power_off_fn };
-
-	list_append(&work_items, &work.node);
+	cdba_queue(MSG_POWER_OFF);
 }
 
-static void request_fastboot_continue_fn(struct work *work, int ssh_stdin)
-{
-	int ret;
-
-	ret = cdba_send(ssh_stdin, MSG_FASTBOOT_CONTINUE);
-	if (ret < 0)
-		err(1, "failed to send fastboot continue request");
-}
-
+/**
+ * request_fastboot_continue() - Queue a request to issue a fastboot continue
+ */
 static void request_fastboot_continue(void)
 {
-	static struct work work = { request_fastboot_continue_fn };
-
-	list_append(&work_items, &work.node);
+	cdba_queue(MSG_FASTBOOT_CONTINUE);
 }
 
-struct fastboot_download_work {
-	struct work work;
-
-	void *data;
-	size_t offset;
-	size_t size;
-};
-
-static void fastboot_work_fn(struct work *_work, int ssh_stdin)
-{
-	struct fastboot_download_work *work = container_of(_work, struct fastboot_download_work, work);
-	ssize_t left;
-	int ret;
-
-	left = MIN(2048, work->size - work->offset);
-
-	ret = cdba_send_buf(ssh_stdin, MSG_FASTBOOT_DOWNLOAD,
-			    left,
-			    (char *)work->data + work->offset);
-	if (ret < 0 && errno == EAGAIN) {
-		list_append(&work_items, &_work->node);
-		return;
-	} else if (ret < 0) {
-		err(1, "failed to write fastboot message");
-	}
-
-	work->offset += left;
-
-	/* We've sent the entire image, and a zero length packet */
-	if (!left)
-		free(work);
-	else
-		list_append(&work_items, &_work->node);
-}
-
+/**
+ * request_fastboot_files() - Queue the fastboot download (and boot) of fastboot_file
+ */
 static void request_fastboot_files(void)
 {
-	struct fastboot_download_work *work;
 	struct stat sb;
+	size_t offset;
+	size_t len;
+	ssize_t n;
+	char buf[TX_DATA_CHUNK_SIZE];
 	int fd;
-
-	work = calloc(1, sizeof(*work));
-	work->work.fn = fastboot_work_fn;
 
 	fd = open(fastboot_file, O_RDONLY);
 	if (fd < 0)
@@ -417,12 +330,18 @@ static void request_fastboot_files(void)
 
 	fstat(fd, &sb);
 
-	work->size = sb.st_size;
-	work->data = malloc(work->size);
-	read(fd, work->data, work->size);
-	close(fd);
+	for (offset = 0; offset < sb.st_size; offset += TX_DATA_CHUNK_SIZE) {
+		len = MIN(TX_DATA_CHUNK_SIZE, sb.st_size - offset);
 
-	list_append(&work_items, &work->work.node);
+		n = read(fd, buf, len);
+		if (n != len)
+			errx(1, "failed to read fastboot payload");
+
+		cdba_queue_data(MSG_FASTBOOT_DOWNLOAD, len, buf);
+	}
+	cdba_queue(MSG_FASTBOOT_DOWNLOAD);
+
+	close(fd);
 }
 
 static void handle_status_update(const void *data, size_t len)
@@ -433,16 +352,8 @@ static void handle_status_update(const void *data, size_t len)
 	write(status_fd, data, len);
 }
 
-static void status_enable_fn(struct work *work, int ssh_stdin)
-{
-	cdba_send(ssh_stdin, MSG_STATUS_UPDATE);
-
-	free(work);
-}
-
 static void status_pipe_open(const char *path)
 {
-	struct work *work;
 	int ret;
 	int fd;
 
@@ -456,11 +367,8 @@ static void status_pipe_open(const char *path)
 
 	status_fd = fd;
 
-	/* Queue a MSG_STATUS_UPDATE request */
-	work = malloc(sizeof(*work));
-	work->fn = status_enable_fn;
-
-	list_append(&work_items, &work->node);
+	/* Queue a MSG_STATUS_UPDATE request to start the status flow */
+	cdba_queue(MSG_STATUS_UPDATE);
 }
 
 static void handle_list_devices(const void *data, size_t len)
@@ -644,8 +552,7 @@ int main(int argc, char **argv)
 	const char *status_pipe = NULL;
 	int timeout_inactivity = 0;
 	int timeout_total = 600;
-	struct work *next;
-	struct work *work;
+	struct tx_item *tx_item;
 	struct circ_buf recv_buf = { };
 	const char *board = NULL;
 	const char *host = NULL;
@@ -775,7 +682,7 @@ int main(int argc, char **argv)
 		}
 
 		FD_ZERO(&wfds);
-		if (!list_empty(&work_items))
+		if (!list_empty(&tx_queue))
 			FD_SET(ssh_fds[0], &wfds);
 
 		if (timeout) {
@@ -844,10 +751,14 @@ int main(int argc, char **argv)
 		}
 
 		if (FD_ISSET(ssh_fds[0], &wfds)) {
-			list_for_each_entry_safe(work, next, &work_items, node) {
-				list_del(&work->node);
+			if (!list_empty(&tx_queue)) {
+				tx_item = list_entry_first(&tx_queue, struct tx_item, node);
+				n = cdba_tx_one(ssh_fds[0], tx_item);
+				if (n < 0)
+					err(1, "failed to write to SSH pipe");
 
-				work->fn(work, ssh_fds[0]);
+				list_del(&tx_item->node);
+				free(tx_item);
 			}
 		}
 	}
