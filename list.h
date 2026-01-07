@@ -22,32 +22,6 @@ struct list_head {
 
 #define LIST_INIT(list) { &(list), &(list) }
 
-static inline void list_init(struct list_head *list)
-{
-	list->prev = list->next = list;
-}
-
-static inline bool list_empty(struct list_head *list)
-{
-	return list->next == list;
-}
-
-static inline void list_add(struct list_head *list, struct list_head *item)
-{
-	struct list_head *prev = list->prev;
-
-	item->next = list;
-	item->prev = prev;
-
-	prev->next = list->prev = item;
-}
-
-static inline void list_del(struct list_head *item)
-{
-	item->prev->next = item->next;
-	item->next->prev = item->prev;
-}
-
 #define list_for_each(item, list) \
 	for (item = (list)->next; item != list; item = item->next)
 
@@ -74,5 +48,52 @@ static inline void list_del(struct list_head *item)
 	     &item->member != list; \
 	     item = next, \
 	     next = list_entry_next(item, member)) \
+
+static inline void list_init(struct list_head *list)
+{
+	list->prev = list->next = list;
+}
+
+static inline bool list_empty(struct list_head *list)
+{
+	return list->next == list;
+}
+
+static inline void list_append(struct list_head *list, struct list_head *item)
+{
+	struct list_head *prev = list->prev;
+
+	item->next = list;
+	item->prev = prev;
+
+	prev->next = list->prev = item;
+}
+
+static inline void list_prepend(struct list_head *list, struct list_head *item)
+{
+	struct list_head *next = list->prev;
+
+	item->next = next;
+	item->prev = list;
+
+	list->next = next->prev = item;
+}
+
+static inline void list_del(struct list_head *item)
+{
+	item->prev->next = item->next;
+	item->next->prev = item->prev;
+}
+
+static inline size_t list_len(struct list_head *list)
+{
+	struct list_head *it;
+	size_t n = 0;
+
+	list_for_each(it, list)
+		n++;
+
+	return n;
+}
 
 #endif

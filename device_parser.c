@@ -129,7 +129,7 @@ static void parse_board(struct device_parser *dp)
 
 				user->username = strdup(key);
 
-				list_add(dev->users, &user->node);
+				list_append(dev->users, &user->node);
 			}
 
 			device_parser_expect(dp, YAML_SEQUENCE_END_EVENT, NULL, 0);

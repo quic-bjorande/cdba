@@ -43,7 +43,7 @@ static struct list_head devices = LIST_INIT(devices);
 
 void device_add(struct device *device)
 {
-	list_add(&devices, &device->node);
+	list_append(&devices, &device->node);
 }
 
 static void device_lock(struct device *device)

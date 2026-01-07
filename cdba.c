@@ -255,7 +255,7 @@ static void request_board_list(void)
 	work = malloc(sizeof(*work));
 	work->fn = list_boards_fn;
 
-	list_add(&work_items, &work->node);
+	list_append(&work_items, &work->node);
 }
 
 struct board_info_request {
@@ -285,7 +285,7 @@ static void request_board_info(const char *board)
 	work->work.fn = board_info_fn;
 	work->board = board;
 
-	list_add(&work_items, &work->work.node);
+	list_append(&work_items, &work->work.node);
 }
 
 struct select_board {
@@ -316,7 +316,7 @@ static void request_select_board(const char *board)
 	work->work.fn = select_board_fn;
 	work->board = board;
 
-	list_add(&work_items, &work->work.node);
+	list_append(&work_items, &work->work.node);
 }
 
 static void request_power_on_fn(struct work *work, int ssh_stdin)
@@ -341,14 +341,14 @@ static void request_power_on(void)
 {
 	static struct work work = { request_power_on_fn };
 
-	list_add(&work_items, &work.node);
+	list_append(&work_items, &work.node);
 }
 
 static void request_power_off(void)
 {
 	static struct work work = { request_power_off_fn };
 
-	list_add(&work_items, &work.node);
+	list_append(&work_items, &work.node);
 }
 
 static void request_fastboot_continue_fn(struct work *work, int ssh_stdin)
@@ -364,7 +364,7 @@ static void request_fastboot_continue(void)
 {
 	static struct work work = { request_fastboot_continue_fn };
 
-	list_add(&work_items, &work.node);
+	list_append(&work_items, &work.node);
 }
 
 struct fastboot_download_work {
@@ -387,7 +387,7 @@ static void fastboot_work_fn(struct work *_work, int ssh_stdin)
 			    left,
 			    (char *)work->data + work->offset);
 	if (ret < 0 && errno == EAGAIN) {
-		list_add(&work_items, &_work->node);
+		list_append(&work_items, &_work->node);
 		return;
 	} else if (ret < 0) {
 		err(1, "failed to write fastboot message");
@@ -399,7 +399,7 @@ static void fastboot_work_fn(struct work *_work, int ssh_stdin)
 	if (!left)
 		free(work);
 	else
-		list_add(&work_items, &_work->node);
+		list_append(&work_items, &_work->node);
 }
 
 static void request_fastboot_files(void)
@@ -422,7 +422,7 @@ static void request_fastboot_files(void)
 	read(fd, work->data, work->size);
 	close(fd);
 
-	list_add(&work_items, &work->work.node);
+	list_append(&work_items, &work->work.node);
 }
 
 static void handle_status_update(const void *data, size_t len)
@@ -460,7 +460,7 @@ static void status_pipe_open(const char *path)
 	work = malloc(sizeof(*work));
 	work->fn = status_enable_fn;
 
-	list_add(&work_items, &work->node);
+	list_append(&work_items, &work->node);
 }
 
 static void handle_list_devices(const void *data, size_t len)

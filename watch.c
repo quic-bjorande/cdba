@@ -51,7 +51,7 @@ void watch_add_readfd(int fd, int (*cb)(int, void*), void *data)
 	w->cb = cb;
 	w->data = data;
 
-	list_add(&read_watches, &w->node);
+	list_append(&read_watches, &w->node);
 }
 
 void watch_timer_add(int timeout_ms, void (*cb)(void *), void *data)
@@ -71,7 +71,7 @@ void watch_timer_add(int timeout_ms, void (*cb)(void *), void *data)
 	t->data = data;
 	timeradd(&now, &tv_timeout, &t->tv);
 
-	list_add(&timer_watches, &t->node);
+	list_append(&timer_watches, &t->node);
 }
 
 static struct timeval *watch_timer_next(void)
