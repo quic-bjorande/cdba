@@ -41,6 +41,9 @@ struct tx_item {
 
 	uint8_t type;
 	uint16_t len;
+
+	int fd;
+
 	uint8_t payload[];
 };
 
@@ -145,6 +148,8 @@ static ssize_t cdba_tx_one(int fd, struct tx_item *item)
 {
 	struct iovec iov[2];
 	struct msg msg;
+	void *buf;
+	ssize_t n;
 
 	msg.type = item->type;
 	msg.len = item->len;
@@ -152,8 +157,20 @@ static ssize_t cdba_tx_one(int fd, struct tx_item *item)
 	iov[0].iov_base = &msg;
 	iov[0].iov_len = sizeof(msg);
 
-	iov[1].iov_base = item->payload;
-	iov[1].iov_len = item->len;
+	if (item->fd != -1 && item->len) {
+		buf = alloca(item->len);
+		n = read(item->fd, buf, item->len);
+		if (n != item->len)
+			err(1, "failed to read %u bytes from file", item->len);
+
+		iov[1].iov_base = buf;
+		iov[1].iov_len = item->len;
+	} else if (item->fd != -1) {
+		close(item->fd);
+	} else {
+		iov[1].iov_base = item->payload;
+		iov[1].iov_len = item->len;
+	}
 
 	return writev(fd, iov, item->len ? 2 : 1);
 }
@@ -165,7 +182,20 @@ static void cdba_queue_data(int type, size_t len, const void *buf)
 	item = calloc(1, sizeof(*item) + len);
 	item->type = type;
 	item->len = len;
+	item->fd = -1;
 	memcpy(item->payload, buf, len);
+
+	list_append(&tx_queue, &item->node);
+}
+
+static void cdba_queue_fd(int type, size_t len, int fd)
+{
+	struct tx_item *item;
+
+	item = calloc(1, sizeof(*item) + len);
+	item->type = type;
+	item->len = len;
+	item->fd = fd;
 
 	list_append(&tx_queue, &item->node);
 }
@@ -320,8 +350,6 @@ static void request_fastboot_files(void)
 	struct stat sb;
 	size_t offset;
 	size_t len;
-	ssize_t n;
-	char buf[TX_DATA_CHUNK_SIZE];
 	int fd;
 
 	fd = open(fastboot_file, O_RDONLY);
@@ -332,16 +360,9 @@ static void request_fastboot_files(void)
 
 	for (offset = 0; offset < sb.st_size; offset += TX_DATA_CHUNK_SIZE) {
 		len = MIN(TX_DATA_CHUNK_SIZE, sb.st_size - offset);
-
-		n = read(fd, buf, len);
-		if (n != len)
-			errx(1, "failed to read fastboot payload");
-
-		cdba_queue_data(MSG_FASTBOOT_DOWNLOAD, len, buf);
+		cdba_queue_fd(MSG_FASTBOOT_DOWNLOAD, len, fd);
 	}
-	cdba_queue(MSG_FASTBOOT_DOWNLOAD);
-
-	close(fd);
+	cdba_queue_fd(MSG_FASTBOOT_DOWNLOAD, 0, fd);
 }
 
 static void handle_status_update(const void *data, size_t len)
