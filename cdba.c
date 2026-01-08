@@ -31,10 +31,20 @@ static bool quit;
 static bool fastboot_repeat;
 static bool fastboot_done;
 static bool fastboot_continue;
+static bool edl_pending;
 
 static int status_fd = -1;
 
 static const char *fastboot_file;
+
+struct edl_file {
+	struct list_head node;
+
+	char *target;
+	char *filename;
+};
+
+static struct list_head edl_files = LIST_INIT(edl_files);
 
 struct tx_item {
 	struct list_head node;
@@ -323,7 +333,16 @@ static void request_select_board(const char *board)
  */
 static void request_power_on(void)
 {
-	cdba_queue(MSG_POWER_ON);
+	uint8_t mode;
+
+	if (edl_pending)
+		mode = MSG_POWER_ON_EDL;
+	else if (fastboot_file)
+		mode = MSG_POWER_ON_FASTBOOT;
+	else
+		mode = MSG_POWER_ON_NORMAL;
+
+	cdba_queue_data(MSG_POWER_ON, 1, &mode);
 }
 
 /**
@@ -363,6 +382,52 @@ static void request_fastboot_files(void)
 		cdba_queue_fd(MSG_FASTBOOT_DOWNLOAD, len, fd);
 	}
 	cdba_queue_fd(MSG_FASTBOOT_DOWNLOAD, 0, fd);
+}
+
+static void edl_submit_one(struct edl_file *edl)
+{
+	struct stat sb;
+	size_t offset;
+	size_t len;
+	int fd;
+
+	fd = open(edl->filename, O_RDONLY);
+	if (fd < 0)
+		err(1, "failed to open \"%s\" for EDL flashing", edl->filename);
+
+	fstat(fd, &sb);
+
+	for (offset = 0; offset < sb.st_size; offset += TX_DATA_CHUNK_SIZE) {
+		len = MIN(TX_DATA_CHUNK_SIZE, sb.st_size - offset);
+		cdba_queue_fd(MSG_EDL_DOWNLOAD, len, fd);
+	}
+	cdba_queue_fd(MSG_EDL_DOWNLOAD, 0, fd);
+
+	cdba_queue_data(MSG_EDL_FLASH, strlen(edl->target) + 1, edl->target);
+}
+
+static void handle_edl_present(uint8_t present)
+{
+	struct edl_file *edl;
+
+	if (present) {
+		// printf("======================================== MSG_EDL_PRESENT(yes)\n");
+
+		if (!edl_pending) {
+			fprintf(stderr, "device entered EDL unexpectedly, do we have a ramdump?\n");
+			quit = true;
+			return;
+		}
+
+		list_for_each_entry(edl, &edl_files, node)
+			edl_submit_one(edl);
+
+		cdba_queue(MSG_EDL_RESET);
+
+		edl_pending = false;
+	} else {
+		// printf("======================================== MSG_EDL_PRESENT(no)\n");
+	}
 }
 
 static void handle_status_update(const void *data, size_t len)
@@ -498,6 +563,9 @@ static int handle_message(struct circ_buf *buf)
 				}
 			}
 			break;
+		case MSG_EDL_PRESENT:
+			handle_edl_present(*(uint8_t *)msg->data);
+			break;
 		case MSG_FASTBOOT_DOWNLOAD:
 			// printf("======================================== MSG_FASTBOOT_DOWNLOAD\n");
 			fastboot_done = true;
@@ -632,6 +700,22 @@ int main(int argc, char **argv)
 
 	switch (verb) {
 	case CDBA_BOOT:
+		while (optind < argc && strcmp(argv[optind], "write") == 0) {
+			struct edl_file *edl;
+
+			if (optind + 3 > argc)
+				usage();
+
+			edl = calloc(1, sizeof(*edl));
+			edl->target = argv[optind + 1];
+			edl->filename = argv[optind + 2];
+
+			list_append(&edl_files, &edl->node);
+
+			optind += 3;
+			edl_pending = true;
+		}
+
 		if (optind > argc || !board)
 			usage();
 
