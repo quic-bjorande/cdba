@@ -71,14 +71,14 @@ int main(int argc, char **argv)
 	}
 
 	if (on) {
-		device_power(selected_device, true);
+		device_power_on(selected_device, MSG_POWER_ON_NORMAL);
 		watch_main_loop(ready);
 
 		selected_device->usb_always_on = true;
 		selected_device->power_always_on = true;
 	} else {
 		device_usb(selected_device, false);
-		device_power(selected_device, false);
+		device_power_off(selected_device);
 	}
 
 	device_close(selected_device);

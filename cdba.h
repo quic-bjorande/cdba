@@ -42,6 +42,7 @@ struct key_press {
 enum {
 	DEVICE_KEY_FASTBOOT,
 	DEVICE_KEY_POWER,
+	DEVICE_KEY_EDL,
 	DEVICE_KEY_COUNT
 };
 
@@ -49,6 +50,13 @@ enum {
 	KEY_PRESS_RELEASE,
 	KEY_PRESS_PRESS,
 	KEY_PRESS_PULSE,
+};
+
+enum power_on_mode {
+	MSG_POWER_ON_NORMAL,
+	MSG_POWER_ON_FASTBOOT,
+	MSG_POWER_ON_EDL,
+	MSG_POWER_ON_COUNT
 };
 
 #endif

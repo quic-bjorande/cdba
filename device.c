@@ -100,8 +100,6 @@ static bool device_check_access(struct device *device,
 	return false;
 }
 
-static int device_power_off(struct device *device);
-
 struct device *device_open(const char *board,
 			   const char *username)
 {
@@ -175,6 +173,7 @@ enum {
 	DEVICE_STATE_PRESS,
 	DEVICE_STATE_RELEASE_PWR,
 	DEVICE_STATE_RELEASE_FASTBOOT,
+	DEVICE_STATE_RELEASE_EDL,
 	DEVICE_STATE_RUNNING,
 };
 
@@ -185,7 +184,9 @@ static void device_tick(void *data)
 	switch (device->state) {
 	case DEVICE_STATE_START:
 		/* Make sure power key is not engaged */
-		if (device->fastboot_key_timeout)
+		if (device->power_on_mode == MSG_POWER_ON_EDL)
+			device_key(device, DEVICE_KEY_EDL, true);
+		else if (device->fastboot_key_timeout)
 			device_key(device, DEVICE_KEY_FASTBOOT, true);
 		if (device->has_power_key)
 			device_key(device, DEVICE_KEY_POWER, false);
@@ -201,6 +202,9 @@ static void device_tick(void *data)
 		if (device->has_power_key) {
 			device->state = DEVICE_STATE_PRESS;
 			watch_timer_add(250, device_tick, device);
+		} else if (device->power_on_mode == MSG_POWER_ON_EDL) {
+			device->state = DEVICE_STATE_RELEASE_EDL;
+			watch_timer_add(device->fastboot_key_timeout * 1000, device_tick, device);
 		} else if (device->fastboot_key_timeout) {
 			device->state = DEVICE_STATE_RELEASE_FASTBOOT;
 			watch_timer_add(device->fastboot_key_timeout * 1000, device_tick, device);
@@ -219,12 +223,19 @@ static void device_tick(void *data)
 		/* Release power key */
 		device_key(device, DEVICE_KEY_POWER, false);
 
-		if (device->fastboot_key_timeout) {
+		if (device->power_on_mode == MSG_POWER_ON_EDL) {
+			device->state = DEVICE_STATE_RELEASE_EDL;
+			watch_timer_add(device->fastboot_key_timeout * 1000, device_tick, device);
+		} else if (device->fastboot_key_timeout) {
 			device->state = DEVICE_STATE_RELEASE_FASTBOOT;
 			watch_timer_add(device->fastboot_key_timeout * 1000, device_tick, device);
 		} else {
 			device->state = DEVICE_STATE_RUNNING;
 		}
+		break;
+	case DEVICE_STATE_RELEASE_EDL:
+		device_key(device, DEVICE_KEY_EDL, false);
+		device->state = DEVICE_STATE_RUNNING;
 		break;
 	case DEVICE_STATE_RELEASE_FASTBOOT:
 		device_key(device, DEVICE_KEY_FASTBOOT, false);
@@ -238,18 +249,19 @@ bool device_is_running(struct device *device)
 	return device->state == DEVICE_STATE_RUNNING;
 }
 
-static int device_power_on(struct device *device)
+int device_power_on(struct device *device, enum power_on_mode mode)
 {
 	if (!device || !device_has_control(device, power))
 		return 0;
 
+	device->power_on_mode = mode;
 	device->state = DEVICE_STATE_START;
 	device_tick(device);
 
 	return 0;
 }
 
-static int device_power_off(struct device *device)
+int device_power_off(struct device *device)
 {
 	if (!device || !device_has_control(device, power))
 		return 0;
@@ -257,14 +269,6 @@ static int device_power_off(struct device *device)
 	device_control(device, power, false);
 
 	return 0;
-}
-
-int device_power(struct device *device, bool on)
-{
-	if (on)
-		return device_power_on(device);
-	else
-		return device_power_off(device);
 }
 
 void device_status_enable(struct device *device)
@@ -400,7 +404,7 @@ void device_close(struct device *dev)
 	if (!dev->usb_always_on)
 		device_usb(dev, false);
 	if (!dev->power_always_on)
-		device_power(dev, false);
+		device_power_off(dev);
 
 	if (device_has_control(dev, close))
 		device_control(dev, close);

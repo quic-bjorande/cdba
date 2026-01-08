@@ -138,6 +138,7 @@ static int handle_stdin(int fd, void *buf)
 	static struct circ_buf recv_buf = { };
 	struct msg *msg;
 	struct msg hdr;
+	uint8_t mode;
 	size_t n;
 	int ret;
 
@@ -171,12 +172,22 @@ static int handle_stdin(int fd, void *buf)
 			// fprintf(stderr, "hard reset\n");
 			break;
 		case MSG_POWER_ON:
-			device_power(selected_device, true);
+			if (msg->len == 1)
+				mode = *(uint8_t *)msg->data;
+			else
+				mode = MSG_POWER_ON_NORMAL;
+
+			if (mode >= MSG_POWER_ON_COUNT) {
+				fprintf(stderr, "invalid power on mode requested\n");
+				exit(1);
+			}
+
+			device_power_on(selected_device, mode);
 
 			cdba_send(MSG_POWER_ON);
 			break;
 		case MSG_POWER_OFF:
-			device_power(selected_device, false);
+			device_power_off(selected_device);
 
 			cdba_send(MSG_POWER_OFF);
 			break;
