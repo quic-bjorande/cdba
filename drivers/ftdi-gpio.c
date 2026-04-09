@@ -34,6 +34,7 @@ enum {
 	GPIO_USB0_DISCONNECT,		// Simulate main USB connection
 	GPIO_USB1_DISCONNECT,		// Simulate secondary USB connection
 	GPIO_OUTPUT_ENABLE,		// Enable FTDI signals to flow to the board
+	GPIO_EDL_KEY,			// Hold while power on to enter flashing mode
 	GPIO_COUNT
 };
 
@@ -190,6 +191,8 @@ void *ftdi_gpio_parse_options(struct device_parser *dp)
 			gpio_id = GPIO_USB1_DISCONNECT;
 		} else if (!strcmp(key, "output_enable")) {
 			gpio_id = GPIO_OUTPUT_ENABLE;
+		} else if (!strcmp(key, "edl")) {
+			gpio_id = GPIO_EDL_KEY;
 		} else {
 			if (!device_parser_accept(dp, YAML_SCALAR_EVENT, value, TOKEN_LENGTH))
 				errx(1, "%s: expected value for \"%s\"", __func__, key);
@@ -390,6 +393,9 @@ static void ftdi_gpio_key(struct device *dev, int key, bool asserted)
 		break;
 	case DEVICE_KEY_POWER:
 		ftdi_gpio_toggle_io(ftdi_gpio, GPIO_POWER_KEY, asserted);
+		break;
+	case DEVICE_KEY_EDL:
+		ftdi_gpio_toggle_io(ftdi_gpio, GPIO_EDL_KEY, asserted);
 		break;
 	}
 }
