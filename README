@@ -2,6 +2,9 @@
 The CDBA control tool is used for remotely booting images on development boards
 attached using a CDB Assist [https://github.com/sonyxperiadev/CDB-Assist] or Conmux.
 
+Protocol documentation for client/server interoperability and protocol
+evolution lives in docs/protocol.md.
+
 = Dependencies
 sudo apt-get install libudev-dev libyaml-dev libftdi1-dev pkg-config meson for debian systems
 dnf install systemd-devel libyaml-devel libftdi1-devel pkg-config meson for fedora systems
