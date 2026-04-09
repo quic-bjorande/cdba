@@ -19,6 +19,7 @@
 
 #include "cdba-server.h"
 #include "device.h"
+#include "edl.h"
 #include "fastboot.h"
 #include "list.h"
 #include "ppps.h"
@@ -299,6 +300,11 @@ int device_write(struct device *device, const void *buf, size_t len)
 		return 0;
 
 	return device_console(device, write, buf, len);
+}
+
+void device_edl_open(struct device *device, void (*edl_present)(bool present))
+{
+	device->edl = edl_open(device->serial, edl_present);
 }
 
 void device_fastboot_open(struct device *device,

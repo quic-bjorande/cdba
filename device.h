@@ -6,6 +6,7 @@
 #include "list.h"
 
 struct cdb_assist;
+struct edl;
 struct fastboot;
 struct fastboot_ops;
 struct device;
@@ -43,6 +44,7 @@ struct device {
 	bool tickle_mmc;
 	bool usb_always_on;
 	bool power_always_on;
+	struct edl *edl;
 	struct fastboot *fastboot;
 	unsigned int fastboot_key_timeout;
 	int state;
@@ -87,6 +89,7 @@ int device_write(struct device *device, const void *buf, size_t len);
 
 void device_boot(struct device *device, const void *data, size_t len);
 
+void device_edl_open(struct device *device, void (*edl_present)(bool present));
 void device_fastboot_open(struct device *device,
 			  struct fastboot_ops *fastboot_ops);
 void device_fastboot_boot(struct device *device);

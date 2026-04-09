@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <syslog.h>
 
@@ -25,6 +26,26 @@
 static const char *username;
 
 struct device *selected_device;
+
+struct edl_file {
+	struct list_head node;
+
+	int fd;
+
+	char *filename;
+	char *target;
+};
+
+static struct list_head edl_files = LIST_INIT(edl_files);
+
+static void edl_present(bool present)
+{
+	uint8_t value = present ? 1 : 0;
+
+	warnx("edl is %spresent", present? "" : "not ");
+
+	cdba_send_buf(MSG_EDL_PRESENT, 1, &value);
+}
 
 static void fastboot_opened(struct fastboot *fb, void *data)
 {
@@ -60,6 +81,7 @@ static void msg_select_board(const void *param)
 		fprintf(stderr, "failed to open %s\n", (const char *)param);
 		watch_quit();
 	} else {
+		device_edl_open(selected_device, edl_present);
 		device_fastboot_open(selected_device, &fastboot_ops);
 	}
 
@@ -91,6 +113,79 @@ static void msg_fastboot_download(const void *data, size_t len)
 		fastboot_payload = NULL;
 		fastboot_size = 0;
 	}
+}
+
+static struct edl_file *current_edl_file;
+
+static void msg_edl_download(const void *data, size_t len)
+{
+	char template[] = "/tmp/cdba.XXXXXX";
+	struct edl_file *edl;
+
+	edl = current_edl_file;
+
+	if (!edl) {
+		edl = calloc(1, sizeof(*edl));
+
+		edl->filename = strdup(template);
+		edl->fd = mkstemp(edl->filename);
+		if (edl->fd < 0)
+			err(1, "failed to create temporary file");
+
+		list_append(&edl_files, &edl->node);
+
+		current_edl_file = edl;
+	}
+
+	write(edl->fd, data, len);
+
+	if (len == 0)
+		close(edl->fd);
+}
+
+static void msg_edl_flash(const void *data, size_t len)
+{
+	const char *target = data;
+
+	fprintf(stderr, "edl flash into '%s'\n", target);
+
+	current_edl_file->target = strdup(target);
+	current_edl_file = NULL;
+}
+
+static void msg_edl_reset(void)
+{
+	struct edl_file *edl;
+	const char **argv;
+	size_t args;
+	size_t arg = 0;
+
+	fprintf(stderr, "edl reset\n");
+
+	args = 4 + list_len(&edl_files) * 3 + 1;
+	argv = calloc(args, sizeof(char *));
+
+	argv[arg++] = "qdl";
+	argv[arg++] = "firehose-hamoa.elf";
+	argv[arg++] = "--storage";
+	argv[arg++] = "nvme";
+
+	list_for_each_entry(edl, &edl_files, node) {
+		argv[arg++] = "write";
+		argv[arg++] = edl->target;
+		argv[arg++] = edl->filename;
+	}
+	argv[arg] = NULL;
+
+	if (fork() == 0) {
+		dup2(STDERR_FILENO, STDOUT_FILENO);
+		execvp("qdl", (char **)argv);
+		err(127, "failed to spawn qdl failed");
+	}
+	wait(NULL);
+
+	list_for_each_entry(edl, &edl_files, node)
+		unlink(edl->filename);
 }
 
 static void msg_fastboot_continue(void)
@@ -220,6 +315,15 @@ static int handle_stdin(int fd, void *buf)
 			break;
 		case MSG_KEY_PRESS:
 			msg_key_press(msg->data, msg->len);
+			break;
+		case MSG_EDL_DOWNLOAD:
+			msg_edl_download(msg->data, msg->len);
+			break;
+		case MSG_EDL_FLASH:
+			msg_edl_flash(msg->data, msg->len);
+			break;
+		case MSG_EDL_RESET:
+			msg_edl_reset();
 			break;
 		default:
 			fprintf(stderr, "unk %d len %d\n", msg->type, msg->len);
